@@ -12,11 +12,24 @@ wp-local-push
 
 Usage:
   wp-local-push setup
-  wp-local-push push [--delete] [--dry-run]
+  wp-local-push push [--delete] [--dry-run] [--exclude RX] [--no-excludes]
+  wp-local-push excludes
   wp-local-push doctor
+
+Options (push):
+  --delete        delete remote files not present locally (careful)
+  --dry-run       show what would happen, transfer nothing
+  --exclude RX    extra exclude pattern (extended regex, repeatable)
+  --no-excludes   push everything, including dev files (careful)
+
+Dev files (.git, node_modules, .DS_Store, lock files, build configs, ...) are
+never pushed. Run `wp-local-push excludes` to see the effective patterns.
 
 Config:
   Stored at ~/.config/wp-local-push/config (or $XDG_CONFIG_HOME/wp-local-push/config)
+
+  EXCLUDES=( ... )        replace the built-in exclude patterns
+  EXTRA_EXCLUDES=( ... )  add to the built-in exclude patterns
 EOF
 }
 
@@ -35,6 +48,113 @@ ensure_config_dir() {
 
 config_file() {
   echo "$CONFIG_FILE_DEFAULT"
+}
+
+# Development/tooling files that should never end up on a live server.
+# Extended regular expressions (egrep syntax), matched against the path
+# relative to the pushed theme/plugin. Directories match with a trailing slash.
+DEFAULT_EXCLUDES=(
+  # version control (.git/, .gitignore, .gitattributes, .github/, ...)
+  '(^|/)\.git'
+  '(^|/)\.svn/'
+  '(^|/)\.hg/'
+  '(^|/)\.bzr/'
+  # OS and editor junk
+  '(^|/)\.DS_Store$'
+  '(^|/)\._'
+  '(^|/)Thumbs\.db$'
+  '(^|/)\.idea/'
+  '(^|/)\.vscode/'
+  '(^|/)\.claude/'
+  '\.swp$'
+  '\.orig$'
+  '\.rej$'
+  '~$'
+  # dependency and build artifacts
+  '(^|/)node_modules/'
+  '(^|/)bower_components/'
+  '(^|/)\.sass-cache/'
+  '(^|/)\.cache/'
+  '(^|/)\.parcel-cache/'
+  # package manifests and lock files
+  '(^|/)package(-lock)?\.json$'
+  '(^|/)composer\.(json|lock)$'
+  '(^|/)(yarn\.lock|pnpm-lock\.yaml)$'
+  '(^|/)\.(npmrc|nvmrc)$'
+  # build, lint and test tooling
+  '(^|/)(gulpfile|Gruntfile|webpack\.config|vite\.config|rollup\.config)[^/]*$'
+  '(^|/)tsconfig[^/]*\.json$'
+  '(^|/)\.(babelrc|editorconfig|eslintrc|eslintignore|prettierrc|prettierignore|stylelintrc)'
+  '(^|/)(phpunit|phpcs|phpstan)\.xml(\.dist)?$'
+  '(^|/)\.phpcs\.xml(\.dist)?$'
+  '(^|/)tests?/'
+  '(^|/)\.husky/'
+  # secrets and logs
+  '(^|/)\.env'
+  '\.log$'
+)
+
+NO_EXCLUDES=0
+CLI_EXCLUDES=()
+EFFECTIVE_EXCLUDES=()
+
+# Fills EFFECTIVE_EXCLUDES from defaults + config + CLI.
+resolve_excludes() {
+  EFFECTIVE_EXCLUDES=()
+
+  if [[ "$NO_EXCLUDES" -eq 1 ]]; then
+    return 0
+  fi
+
+  if declare -p EXCLUDES >/dev/null 2>&1; then
+    if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+      EFFECTIVE_EXCLUDES=("${EXCLUDES[@]}")
+    fi
+  else
+    EFFECTIVE_EXCLUDES=("${DEFAULT_EXCLUDES[@]}")
+  fi
+
+  if declare -p EXTRA_EXCLUDES >/dev/null 2>&1 && [[ ${#EXTRA_EXCLUDES[@]} -gt 0 ]]; then
+    EFFECTIVE_EXCLUDES+=("${EXTRA_EXCLUDES[@]}")
+  fi
+
+  if [[ ${#CLI_EXCLUDES[@]} -gt 0 ]]; then
+    EFFECTIVE_EXCLUDES+=("${CLI_EXCLUDES[@]}")
+  fi
+}
+
+# Single-quote a value for use inside an lftp command string.
+lftp_quote() {
+  printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+
+# Renders EFFECTIVE_EXCLUDES as ` -x '...' -x '...'` for the mirror command.
+excludes_to_flags() {
+  local rx out
+  out=""
+  if [[ ${#EFFECTIVE_EXCLUDES[@]} -eq 0 ]]; then
+    echo ""
+    return 0
+  fi
+  for rx in "${EFFECTIVE_EXCLUDES[@]}"; do
+    out="$out -x $(lftp_quote "$rx")"
+  done
+  echo "$out"
+}
+
+cmd_excludes() {
+  load_config || true
+  resolve_excludes
+
+  if [[ ${#EFFECTIVE_EXCLUDES[@]} -eq 0 ]]; then
+    echo "$APP_NAME: no exclude patterns (everything is pushed)"
+    return 0
+  fi
+
+  local rx
+  for rx in "${EFFECTIVE_EXCLUDES[@]}"; do
+    echo "$rx"
+  done
 }
 
 load_config() {
@@ -205,6 +325,14 @@ cmd_setup() {
     echo "LOCAL_SITES_DIR=\"$local_sites_dir\""
     echo "LFTP_BOOKMARK=\"$bookmark\""
     echo "REMOTE_WP_ROOT=\"$remote_wp_root\""
+    echo
+    echo "# Dev files (.git, node_modules, .DS_Store, lock files, ...) are never pushed."
+    echo "# See the effective list with: wp-local-push excludes"
+    echo "# Add your own patterns (extended regex, matched against the path"
+    echo "# relative to the pushed theme/plugin, directories end with a slash):"
+    echo "# EXTRA_EXCLUDES=( '(^|/)assets/src/' '\\.scss$' )"
+    echo "# Or replace the built-in list entirely:"
+    echo "# EXCLUDES=( '(^|/)\\.git' )"
   } >"$config"
 
   if lftp_test "$bookmark"; then
@@ -270,6 +398,19 @@ cmd_push() {
         mirror_flags="$mirror_flags --dry-run"
         shift
         ;;
+      --exclude|-x)
+        [[ $# -ge 2 ]] || die "--exclude requires a pattern"
+        CLI_EXCLUDES+=("$2")
+        shift 2
+        ;;
+      --exclude=*)
+        CLI_EXCLUDES+=("${1#--exclude=}")
+        shift
+        ;;
+      --no-excludes|--no-exclude)
+        NO_EXCLUDES=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -318,15 +459,24 @@ cmd_push() {
 
   remote_path="$remote_site_root/wp-content/$type/$item"
 
+  resolve_excludes
+  local exclude_flags
+  exclude_flags="$(excludes_to_flags)"
+
   echo
   echo "Local : $local_path"
   echo "Remote: $remote_path"
+  if [[ ${#EFFECTIVE_EXCLUDES[@]} -eq 0 ]]; then
+    echo "Skip  : nothing (--no-excludes: dev files WILL be pushed)"
+  else
+    echo "Skip  : ${#EFFECTIVE_EXCLUDES[@]} dev patterns (.git, node_modules, ...; see: $APP_NAME excludes)"
+  fi
 
   local confirm
   confirm=$(prompt "Proceed? (y/N)" "N")
   [[ "$confirm" == "y" || "$confirm" == "Y" ]] || exit 0
 
-  lftp "$LFTP_BOOKMARK" -e "mirror -R$mirror_flags '$local_path' '$remote_path'; quit"
+  lftp "$LFTP_BOOKMARK" -e "mirror -R$mirror_flags$exclude_flags '$local_path' '$remote_path'; quit"
 
   echo "$APP_NAME: done."
 }
@@ -345,6 +495,9 @@ main() {
       ;;
     doctor)
       cmd_doctor "$@"
+      ;;
+    excludes)
+      cmd_excludes "$@"
       ;;
     -h|--help|help|"")
       usage

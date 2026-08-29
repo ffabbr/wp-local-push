@@ -51,6 +51,36 @@ Optional:
 
 - `--dry-run` (show what would happen)
 - `--delete` (delete remote files not present locally, use carefully)
+- `--exclude RX` (extra exclude pattern, repeatable)
+- `--no-excludes` (push everything, dev files included)
+
+## Excluded files
+
+Development files are never pushed: `.git/`, `.gitignore`, `node_modules/`,
+`.DS_Store`, `.env`, lock files and manifests (`composer.json`, `package.json`,
+`yarn.lock`, ...), build/lint configs (`webpack.config.js`, `.eslintrc`, ...),
+`tests/`, editor folders (`.vscode/`, `.idea/`) and `*.log`.
+
+Excluded files are also left alone on the server, so `--delete` will not remove
+a remote `.git` or `.env`.
+
+See the effective list:
+
+```bash
+wp-local-push excludes
+```
+
+Patterns are extended regular expressions, matched against the path relative to
+the pushed theme/plugin (directories have a trailing slash). Adjust them in
+`~/.config/wp-local-push/config`:
+
+```bash
+# add to the built-in list
+EXTRA_EXCLUDES=( '(^|/)assets/src/' '\.scss$' )
+
+# or replace it entirely
+# EXCLUDES=( '(^|/)\.git' )
+```
 
 ## Troubleshooting
 
